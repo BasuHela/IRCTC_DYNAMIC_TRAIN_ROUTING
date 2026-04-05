@@ -1,0 +1,40 @@
+name: irctc-dynamic-router
+description: >
+  Multi-turn RL environment simulating Indian Railways ticket booking
+  with Waitlisted (WL) constraints, budget management, timing conflicts,
+  and multi-hop journey planning across 3 difficulty tiers.
+version: 1.0.0
+author: Solo Warrior
+
+tasks:
+  - id: 1
+    name: Direct Confirmed Booking
+    difficulty: easy
+    description: >
+      Book a single confirmed train from DEL to KOTA.
+      Budget is generous, no WL or timing issues.
+      Tests basic API comprehension and sequential execution.
+
+  - id: 2
+    name: WL Avoidance via Split Journey
+    difficulty: medium
+    description: >
+      Travel DEL to BOM. Direct train is Waitlisted.
+      Agent must discover and book a 2-leg confirmed split journey via KOTA.
+      Tests multi-hop reasoning and WL risk assessment.
+
+  - id: 3
+    name: Multi-Constraint Optimization
+    difficulty: hard
+    description: >
+      Travel DEL to BOM under a tight budget with WL, timing, and cost constraints.
+      Agent must jointly optimize across confirmation status, budget, and temporal feasibility.
+      Only 1-2 valid paths exist per episode.
+
+environment:
+  module: server.environment
+  class: IRCTCEnvironment
+  models:
+    action: server.models.Action
+    observation: server.models.Observation
+    state: server.models.State
