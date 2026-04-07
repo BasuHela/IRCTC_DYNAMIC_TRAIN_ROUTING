@@ -1,108 +1,120 @@
 """
 Baseline inference script for IRCTC Dynamic Train Routing.
-Runs an LLM agent against all 3 tasks via the deployed OpenEnv API.
-Emits structured [START], [STEP], [END] logs for automated evaluation.
+Strictly conforms to the OpenEnv stdout formatting requirements for the Meta Hackathon.
 """
 
+import asyncio
 import os
 import json
 import re
+import textwrap
+from typing import List, Optional
 
 from openai import OpenAI
 from server.models import Action
 from client import IRCTCEnv
 
-# ── Environment Variables ──
-HF_TOKEN = os.environ.get("HF_TOKEN") or os.environ.get("OPENAI_API_KEY", "")
-API_BASE_URL = os.environ.get(
-    "API_BASE_URL", "https://api-inference.huggingface.co/v1/"
-)
-MODEL_NAME = os.environ.get(
-    "MODEL_NAME", "meta-llama/Meta-Llama-3-70B-Instruct"
-)
-# URL of your deployed Hugging Face Space (e.g., "https://username-irctc.hf.space")
-ENV_URL = os.environ.get("ENV_URL", "http://localhost:7860")
+# ── Mandatory Environment Variables ──
+HF_TOKEN = os.environ.get("HF_TOKEN") or os.environ.get("API_KEY", "")
+API_BASE_URL = os.environ.get("API_BASE_URL", "https://api-inference.huggingface.co/v1")
+MODEL_NAME = os.environ.get("MODEL_NAME", "meta-llama/Meta-Llama-3-70B-Instruct")
+ENV_URL = os.environ.get("ENV_URL", "http://localhost:7860") # Your HF Space URL
 
-# ── LLM Client Setup ──
-client = OpenAI(
-    api_key=HF_TOKEN,
-    base_url=API_BASE_URL,
-)
+# Read task ID from environment (default to 1) for single-episode execution
+try:
+    TASK_ID = int(os.environ.get("IRCTC_TASK", "1"))
+    if TASK_ID not in [1, 2, 3]:
+        TASK_ID = 1
+except ValueError:
+    TASK_ID = 1
 
-# ── System Prompt for the Agent ──
-SYSTEM_PROMPT = """You are an IRCTC Train Booking Agent.
-Your goal: get from the source station to the destination station, under budget, with CONFIRMED (CNF) tickets.
+TASK_NAME = f"irctc_task_{TASK_ID}"
+BENCHMARK = "irctc-dynamic-router"
+MAX_STEPS = 30
+TEMPERATURE = 0.1
+MAX_TOKENS = 256
+SUCCESS_SCORE_THRESHOLD = 0.5  # Agent needs >= 0.5 to be considered "successful"
 
-Rules:
-1. Use search_trains to discover available trains between stations.
-2. If a direct train is Waitlisted (WL), search for intermediate stations to split the journey into multiple confirmed legs.
-3. Consider departure/arrival times for multi-leg trips — the next leg must depart at least 60 minutes after the previous leg arrives.
-4. Stay within budget.
-5. When you have booked all necessary tickets and reached your destination, call "finish".
+# ── System Prompt ──
+SYSTEM_PROMPT = textwrap.dedent("""
+    You are an IRCTC Train Booking Agent.
+    Your goal: get from the source station to the destination station, under budget, with CONFIRMED (CNF) tickets.
 
-Output ONLY valid JSON with NO additional text, NO markdown, NO explanation:
-{"command": "search_trains|check_availability|book_ticket|finish", "source_stn": "...", "dest_stn": "...", "train_no": "..."}
+    Rules:
+    1. Use search_trains to discover available trains between stations.
+    2. If a direct train is Waitlisted (WL), search for intermediate stations to split the journey into multiple confirmed legs.
+    3. Consider departure/arrival times for multi-leg trips — the next leg must depart at least 60 minutes after the previous leg arrives.
+    4. Stay within budget.
+    5. When you have booked all necessary tickets and reached your destination, call "finish".
 
-Only include fields relevant to the command:
-- search_trains: requires source_stn and dest_stn
-- check_availability: requires train_no
-- book_ticket: requires train_no
-- finish: no additional fields needed"""
+    Output ONLY valid JSON with NO additional text, NO markdown, NO explanation:
+    {"command": "search_trains|check_availability|book_ticket|finish", "source_stn": "...", "dest_stn": "...", "train_no": "..."}
+""").strip()
 
+# ── Formatting Helpers (Strictly matches hackathon spec) ──
+def log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
 
-def build_context_message(obs_dict: dict) -> str:
-    """Build a concise context string from the observation for the LLM."""
-    parts = [obs_dict.get("message", "")]
+def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+    error_val = error.replace('\n', ' ') if error else "null"
+    action_val = action.replace('\n', ' ')
+    done_val = str(done).lower()
+    print(
+        f"[STEP] step={step} action={action_val} reward={reward:.2f} done={done_val} error={error_val}",
+        flush=True,
+    )
+
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}", flush=True)
+
+def build_user_prompt(step: int, obs_dict: dict, history: List[str]) -> str:
+    """Build context string from observation."""
+    parts = [f"Step: {step}"]
+    parts.append(obs_dict.get("message", ""))
 
     if obs_dict.get("search_results"):
-        parts.append("\nSearch Results:")
+        parts.append("Search Results:")
         for t in obs_dict["search_results"]:
             status_info = t.get("status", "")
             if status_info == "WL" and "wl_confirm_prob" in t:
                 status_info += f" (confirm prob: {t['wl_confirm_prob']})"
             parts.append(
-                f"  Train {t['train_no']} ({t['name']}): "
-                f"{t['source']}→{t['dest']}, ₹{t['price']}, "
-                f"Status: {status_info}, "
-                f"Depart: {t.get('depart_time', 'N/A')}, "
-                f"Arrive: {t.get('arrive_time', 'N/A')}"
+                f"  Train {t['train_no']}: {t['source']}→{t['dest']}, ₹{t['price']}, "
+                f"Status: {status_info}, Depart: {t.get('depart_time', 'N/A')}, Arrive: {t.get('arrive_time', 'N/A')}"
             )
 
     if obs_dict.get("booked_itinerary"):
-        parts.append("\nBooked Itinerary:")
+        parts.append("Booked Itinerary:")
         for b in obs_dict["booked_itinerary"]:
-            parts.append(
-                f"  {b['train_no']}: {b['source']}→{b['dest']}, "
-                f"₹{b['price']} ({b['status']})"
-            )
+            parts.append(f"  {b['train_no']}: {b['source']}→{b['dest']}, ₹{b['price']} ({b['status']})")
 
-    parts.append(f"\nCurrent Location: {obs_dict.get('current_location', 'N/A')}")
+    parts.append(f"Current Location: {obs_dict.get('current_location', 'N/A')}")
     parts.append(f"Wallet Balance: ₹{obs_dict.get('wallet_balance', 0):.0f}")
+    
+    if history:
+        history_block = "\n".join(history[-4:])
+        parts.append(f"\nPrevious steps:\n{history_block}")
 
+    parts.append("\nSend your next action (JSON only).")
     return "\n".join(parts)
 
-
 def parse_action(response_text: str) -> Action:
-    """Parse the LLM response into an Action, handling common formatting issues."""
     text = response_text.strip()
-
     if text.startswith("```"):
-        lines = text.split("\n")
-        lines = [l for l in lines if not l.startswith("```")]
-        text = "\n".join(lines).strip()
+        text = "\n".join([l for l in text.split("\n") if not l.startswith("```")]).strip()
 
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
-        # Use DOTALL to catch multiline JSON block if formatting is messy
         json_match = re.search(r'\{.*\}', text, flags=re.DOTALL)
         if json_match:
             try:
                 data = json.loads(json_match.group())
-            except json.JSONDecodeError:
-                return Action(command="finish")
+            except:
+                raise ValueError("LLM output is not valid JSON.")
         else:
-            return Action(command="finish")
+            raise ValueError("No JSON block found in LLM output.")
 
     return Action(
         command=data.get("command", "finish"),
@@ -111,107 +123,88 @@ def parse_action(response_text: str) -> Action:
         train_no=data.get("train_no"),
     )
 
+async def main() -> None:
+    client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
 
-def run_inference():
-    """Run the baseline agent on all 3 tasks via the WebSocket API."""
-    task_scores = {}
+    history: List[str] = []
+    rewards: List[float] = []
+    steps_taken = 0
+    score = 0.0
+    success = False
 
-    print("[START]", flush=True)
+    log_start(task=TASK_NAME, env=BENCHMARK, model=MODEL_NAME)
 
-    # Use the synchronous WebSocket client context manager
-    with IRCTCEnv(base_url=ENV_URL).sync() as env:
-        for task_id in [1, 2, 3]:
-            obs = env.reset(seed=42, task_id=task_id)
-            obs_dict = obs.model_dump()
-            step_count = 0
-            conversation_history = []
+    env = IRCTCEnv(base_url=ENV_URL)
+    
+    try:
+        # Open the connection
+        await env.connect()
+        obs = await env.reset(seed=42, task_id=TASK_ID)
+        
+        for step in range(1, MAX_STEPS + 1):
+            if obs.done:
+                break
 
-            print(
-                f"[STEP] task_id={task_id} | type=reset | "
-                f"message={obs_dict['message']}",
-                flush=True,
-            )
+            user_prompt = build_user_prompt(step, obs.model_dump(), history)
+            action_obj = None
+            action_str = ""
+            error_msg = None
 
-            while not obs.done:
-                step_count += 1
-                context = build_context_message(obs_dict)
-
-                messages = [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                ]
-                # Keep last 10 turns to stay within context limits
-                for h in conversation_history[-10:]:
-                    messages.append(h)
-                messages.append({"role": "user", "content": context})
-
-                try:
-                    response = client.chat.completions.create(
-                        model=MODEL_NAME,
-                        messages=messages,
-                        temperature=0.1,
-                        max_tokens=256,
-                    )
-                    response_text = response.choices[0].message.content or ""
-                    action = parse_action(response_text)
-                except Exception as e:
-                    print(
-                        f"[STEP] task_id={task_id} | step={step_count} | "
-                        f"error=LLM call failed: {str(e)[:100]} | "
-                        f"fallback=finish",
-                        flush=True,
-                    )
-                    action = Action(command="finish")
-
-                conversation_history.append({"role": "user", "content": context})
-                conversation_history.append(
-                    {"role": "assistant", "content": action.model_dump_json()}
+            # 1. Model Request
+            try:
+                completion = client.chat.completions.create(
+                    model=MODEL_NAME,
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=TEMPERATURE,
+                    max_tokens=MAX_TOKENS,
                 )
+                text = (completion.choices[0].message.content or "").strip()
+                action_obj = parse_action(text)
+                action_str = action_obj.model_dump_json(exclude_none=True)
+            except Exception as exc:
+                error_msg = f"LLM Error: {str(exc)}"
+                action_str = '{"command":"finish"}'
+                action_obj = Action(command="finish")
 
-                action_dict = action.model_dump(exclude_none=True)
+            # 2. Environment Step
+            try:
+                obs = await env.step(action_obj)
+            except Exception as exc:
+                error_msg = f"Env Error: {str(exc)}"
+                obs.done = True
 
-                try:
-                    obs = env.step(action)
-                    obs_dict = obs.model_dump()
-                except Exception as e:
-                    print(
-                        f"[STEP] task_id={task_id} | step={step_count} | "
-                        f"error=step failed: {str(e)[:100]}",
-                        flush=True,
-                    )
-                    break
+            reward = obs.reward or 0.0
+            done = obs.done
 
-                print(
-                    f"[STEP] task_id={task_id} | step={step_count} | "
-                    f"action={json.dumps(action_dict)} | "
-                    f"reward={obs.reward} | done={obs.done}",
-                    flush=True,
-                )
+            rewards.append(reward)
+            steps_taken = step
 
-                if obs.done:
-                    task_scores[task_id] = obs.reward
-                    print(
-                        f"[STEP] task_id={task_id} | type=final | "
-                        f"reward={obs.reward} | steps={step_count}",
-                        flush=True,
-                    )
-                    break
+            # 3. Log Step
+            log_step(step=step, action=action_str, reward=reward, done=done, error=error_msg)
+            history.append(f"Step {step}: {action_str} -> reward {reward:+.2f}")
 
-                if step_count > 35:
-                    task_scores[task_id] = 0.0
-                    print(
-                        f"[STEP] task_id={task_id} | type=timeout | steps={step_count}",
-                        flush=True,
-                    )
-                    break
+            if done:
+                break
 
-    total = sum(task_scores.values())
-    avg = total / len(task_scores) if task_scores else 0.0
-    print(
-        f"[END] scores={json.dumps(task_scores)} | "
-        f"total={total:.4f} | average={avg:.4f}",
-        flush=True,
-    )
+        # The final reward returned by our specific environment is the complete [0, 1] score
+        score = rewards[-1] if rewards else 0.0
+        score = min(max(score, 0.0), 1.0)
+        success = score >= SUCCESS_SCORE_THRESHOLD
 
+    except Exception as e:
+        print(f"[DEBUG] Fatal episode error: {e}", flush=True)
+    
+    finally:
+        try:
+            await env.close()
+        except Exception as e:
+            print(f"[DEBUG] env.close() error: {e}", flush=True)
+        
+        # 4. Log End
+        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
 if __name__ == "__main__":
-    run_inference()
+    asyncio.run(main())
