@@ -16,3 +16,5 @@ ENV/
 *.swo
 *~
 .DS_Store
+sample_inference_script.py
+validate-submission.sh
