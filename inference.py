@@ -16,20 +16,26 @@ from client import IRCTCEnv
 
 # ── Mandatory Environment Variables ──
 HF_TOKEN = os.environ.get("HF_TOKEN") or os.environ.get("API_KEY", "")
-API_BASE_URL = os.environ.get("API_BASE_URL", "https://api-inference.huggingface.co/v1")
-MODEL_NAME = os.environ.get("MODEL_NAME", "meta-llama/Meta-Llama-3-70B-Instruct")
-ENV_URL = os.environ.get("ENV_URL", "http://localhost:7860") # Your HF Space URL
+API_BASE_URL = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
+MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 
-# Read task ID from environment (default to 1) for single-episode execution
+# The autograder runs the Docker container locally and injects its own ENV_URL
+ENV_URL = os.environ.get("ENV_URL", "http://localhost:7860")
+
+# ── Dynamic Autograder Variables ──
+# The Meta grader injects variables based on your openenv.yaml name (irctc-dynamic-router)
+BENCHMARK = os.environ.get("IRCTC_DYNAMIC_ROUTER_BENCHMARK", "irctc-dynamic-router")
+
+# Read task ID dynamically from the grader
 try:
-    TASK_ID = int(os.environ.get("IRCTC_TASK", "1"))
-    if TASK_ID not in [1, 2, 3]:
-        TASK_ID = 1
+    task_env = os.environ.get("IRCTC_DYNAMIC_ROUTER_TASK", "1")
+    TASK_ID = int(task_env)
 except ValueError:
     TASK_ID = 1
 
-TASK_NAME = f"irctc_task_{TASK_ID}"
-BENCHMARK = "irctc-dynamic-router"
+# The grader expects the exact string ID in the STDOUT log
+TASK_NAME = str(TASK_ID)
+
 MAX_STEPS = 30
 TEMPERATURE = 0.1
 MAX_TOKENS = 256
@@ -101,6 +107,8 @@ def build_user_prompt(step: int, obs_dict: dict, history: List[str]) -> str:
 
 def parse_action(response_text: str) -> Action:
     text = response_text.strip()
+    
+    # Qwen frequently outputs markdown code blocks; we must strip them
     if text.startswith("```"):
         text = "\n".join([l for l in text.split("\n") if not l.startswith("```")]).strip()
 
