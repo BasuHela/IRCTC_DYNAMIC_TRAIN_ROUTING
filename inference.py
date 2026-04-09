@@ -7,6 +7,7 @@ import asyncio
 import os
 import json
 import re
+import sys
 import textwrap
 from typing import List, Optional
 
@@ -19,21 +20,18 @@ HF_TOKEN = os.environ.get("HF_TOKEN") or os.environ.get("API_KEY", "")
 API_BASE_URL = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 
-# The autograder runs the Docker container locally and injects its own ENV_URL
+# Phase 2 Validation injects the target port into ENV_URL
 ENV_URL = os.environ.get("ENV_URL", "http://localhost:7860")
 
 # ── Dynamic Autograder Variables ──
-# The Meta grader injects variables based on your openenv.yaml name (irctc-dynamic-router)
 BENCHMARK = os.environ.get("IRCTC_DYNAMIC_ROUTER_BENCHMARK", "irctc-dynamic-router")
 
-# Read task ID dynamically from the grader
 try:
     task_env = os.environ.get("IRCTC_DYNAMIC_ROUTER_TASK", "1")
     TASK_ID = int(task_env)
 except ValueError:
     TASK_ID = 1
 
-# The grader expects the exact string ID in the STDOUT log
 TASK_NAME = str(TASK_ID)
 
 MAX_STEPS = 30
@@ -108,7 +106,6 @@ def build_user_prompt(step: int, obs_dict: dict, history: List[str]) -> str:
 def parse_action(response_text: str) -> Action:
     text = response_text.strip()
     
-    # Qwen frequently outputs markdown code blocks; we must strip them
     if text.startswith("```"):
         text = "\n".join([l for l in text.split("\n") if not l.startswith("```")]).strip()
 
@@ -141,11 +138,10 @@ async def main() -> None:
     success = False
 
     log_start(task=TASK_NAME, env=BENCHMARK, model=MODEL_NAME)
-
+    
     env = IRCTCEnv(base_url=ENV_URL)
     
     try:
-        # Open the connection
         await env.connect()
         obs = await env.reset(seed=42, task_id=TASK_ID)
         
@@ -153,7 +149,8 @@ async def main() -> None:
             if obs.done:
                 break
 
-            user_prompt = build_user_prompt(step, obs.model_dump(), history)
+            obs_data = obs.model_dump() if hasattr(obs, "model_dump") else dict(obs)
+            user_prompt = build_user_prompt(step, obs_data, history)
             action_obj = None
             action_str = ""
             error_msg = None
@@ -197,22 +194,27 @@ async def main() -> None:
             if done:
                 break
 
-        # The final reward returned by our specific environment is the complete [0, 1] score
         score = rewards[-1] if rewards else 0.0
         score = min(max(score, 0.0), 1.0)
         success = score >= SUCCESS_SCORE_THRESHOLD
 
-    except Exception as e:
-        print(f"[DEBUG] Fatal episode error: {e}", flush=True)
-    
+    except asyncio.CancelledError:
+        # Crucial catch: Prevents the grader timeout from crashing the script
+        print("[DEBUG] Episode timed out (CancelledError). Terminating loop.", flush=True)
+    except BaseException as e:
+        # Crucial catch: Catches terminal interrupts and low-level loop errors
+        print(f"[DEBUG] Fatal system error: {e}", flush=True)
     finally:
         try:
             await env.close()
-        except Exception as e:
-            print(f"[DEBUG] env.close() error: {e}", flush=True)
+        except BaseException as e:
+            pass
         
-        # 4. Log End
+        # 4. Log End (This will now ALWAYS execute, satisfying the autograder)
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        sys.exit(0)
