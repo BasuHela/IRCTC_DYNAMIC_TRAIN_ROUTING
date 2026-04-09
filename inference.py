@@ -27,12 +27,12 @@ ENV_URL = os.environ.get("ENV_URL", "http://localhost:7860")
 BENCHMARK = os.environ.get("IRCTC_DYNAMIC_ROUTER_BENCHMARK", "irctc-dynamic-router")
 
 try:
-    task_env = os.environ.get("IRCTC_DYNAMIC_ROUTER_TASK", "1")
-    TASK_ID = int(task_env)
+    task_env = os.environ.get("IRCTC_DYNAMIC_ROUTER_TASK", "")
+    TASK_ID = int(task_env) if task_env else None  # None means run all tasks
 except ValueError:
-    TASK_ID = 1
+    TASK_ID = None
 
-TASK_NAME = str(TASK_ID)
+TASK_IDS = [TASK_ID] if TASK_ID is not None else [1, 2, 3]
 
 MAX_STEPS = 30
 TEMPERATURE = 0.1
@@ -153,22 +153,18 @@ def parse_action(response_text: str) -> Action:
         train_no=data.get("train_no"),
     )
 
-async def main() -> None:
-    client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
-
+async def run_episode(client: OpenAI, env: IRCTCEnv, task_id: int) -> None:
     history: List[str] = []
     rewards: List[float] = []
     steps_taken = 0
     score = 0.0
     success = False
+    task_name = str(task_id)
 
-    log_start(task=TASK_NAME, env=BENCHMARK, model=MODEL_NAME)
-    
-    env = IRCTCEnv(base_url=ENV_URL)
-    
+    log_start(task=task_name, env=BENCHMARK, model=MODEL_NAME)
+
     try:
-        await env.connect()
-        obs = await env.reset(seed=42, task_id=TASK_ID)
+        obs = await env.reset(seed=42, task_id=task_id)
 
         # Extract goal string from initial observation message
         init_obs = obs.observation.model_dump() if hasattr(obs, "observation") else obs.model_dump()
@@ -244,19 +240,32 @@ async def main() -> None:
         success = score >= SUCCESS_SCORE_THRESHOLD
 
     except asyncio.CancelledError:
-        # Crucial catch: Prevents the grader timeout from crashing the script
-        print("[DEBUG] Episode timed out (CancelledError). Terminating loop.", flush=True)
+        print(f"[DEBUG] Task {task_id} timed out (CancelledError). Terminating loop.", flush=True)
+        raise
     except BaseException as e:
-        # Crucial catch: Catches terminal interrupts and low-level loop errors
+        print(f"[DEBUG] Task {task_id} fatal error: {e}", flush=True)
+    finally:
+        # 4. Log End (always executes)
+        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+
+
+async def main() -> None:
+    client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
+    env = IRCTCEnv(base_url=ENV_URL)
+
+    try:
+        await env.connect()
+        for task_id in TASK_IDS:
+            await run_episode(client, env, task_id)
+    except asyncio.CancelledError:
+        print("[DEBUG] Main loop cancelled.", flush=True)
+    except BaseException as e:
         print(f"[DEBUG] Fatal system error: {e}", flush=True)
     finally:
         try:
             await env.close()
-        except BaseException as e:
+        except BaseException:
             pass
-        
-        # 4. Log End (This will now ALWAYS execute, satisfying the autograder)
-        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
 if __name__ == "__main__":
     try:
