@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [
-    { name = "Solo Warrior" }
+    { name = "Basu Hela" }
 ]
 
 dependencies = [
@@ -21,8 +21,11 @@ dependencies = [
 ]
 
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["server*"]
+
+[project.scripts]
+server = "server.app:main"

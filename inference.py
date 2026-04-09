@@ -149,7 +149,8 @@ async def main() -> None:
             if obs.done:
                 break
 
-            obs_data = obs.model_dump() if hasattr(obs, "model_dump") else dict(obs)
+            # Handle both StepResult wrappers and direct Observations depending on the OpenEnv version
+            obs_data = obs.observation.model_dump() if hasattr(obs, "observation") else obs.model_dump()
             user_prompt = build_user_prompt(step, obs_data, history)
             action_obj = None
             action_str = ""
