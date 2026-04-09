@@ -3,7 +3,10 @@ WebSocket client for IRCTC Dynamic Train Routing environment.
 Extends openenv EnvClient for persistent session management.
 """
 
+from typing import Any, Dict
+
 from openenv.core.env_client import EnvClient
+from openenv.core.client_types import StepResult
 from server.models import Action, Observation, State
 
 
@@ -34,3 +37,19 @@ class IRCTCEnv(EnvClient[Action, Observation, State]):
     @property
     def state_cls(self):
         return State
+
+    def _step_payload(self, action: Action) -> Dict[str, Any]:
+        return action.model_dump(exclude_none=True)
+
+    def _parse_result(self, payload: Dict[str, Any]) -> StepResult[Observation]:
+        # Server wraps fields as {"observation": {...}, "reward": ..., "done": ...}
+        obs_data = payload.get("observation", payload)
+        obs = Observation(**{k: v for k, v in obs_data.items() if k in Observation.model_fields})
+        return StepResult(
+            observation=obs,
+            reward=payload.get("reward"),
+            done=payload.get("done", False),
+        )
+
+    def _parse_state(self, payload: Dict[str, Any]) -> State:
+        return State(**{k: v for k, v in payload.items() if k in State.model_fields})

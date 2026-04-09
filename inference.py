@@ -41,18 +41,28 @@ SUCCESS_SCORE_THRESHOLD = 0.5  # Agent needs >= 0.5 to be considered "successful
 
 # ── System Prompt ──
 SYSTEM_PROMPT = textwrap.dedent("""
-    You are an IRCTC Train Booking Agent.
-    Your goal: get from the source station to the destination station, under budget, with CONFIRMED (CNF) tickets.
+    You are an IRCTC Train Booking Agent. Book tickets from source to destination within budget using CONFIRMED (CNF) tickets only.
 
-    Rules:
-    1. Use search_trains to discover available trains between stations.
-    2. If a direct train is Waitlisted (WL), search for intermediate stations to split the journey into multiple confirmed legs.
-    3. Consider departure/arrival times for multi-leg trips — the next leg must depart at least 60 minutes after the previous leg arrives.
-    4. Stay within budget.
-    5. When you have booked all necessary tickets and reached your destination, call "finish".
+    STRICT WORKFLOW:
+    1. search_trains — use the exact station codes shown in "GOAL" and "Available stations". Never invent station codes.
+    2. check_availability(train_no) — pick a CNF train from the search results using its exact train_no
+    3. book_ticket(train_no) — book it using the same exact train_no
+    4. If ALL trains on a route are WL, split the journey via an intermediate station listed in "Available stations"
+    5. Call finish once you have reached the destination
 
-    Output ONLY valid JSON with NO additional text, NO markdown, NO explanation:
-    {"command": "search_trains|check_availability|book_ticket|finish", "source_stn": "...", "dest_stn": "...", "train_no": "..."}
+    RULES:
+    - Use ONLY station codes and train numbers that appear in the observation — never invent them
+    - NEVER repeat a search for the same route
+    - check_availability and book_ticket require only train_no
+    - Multi-leg trips: next departure must be ≥60 min after previous arrival
+    - Only book CNF tickets
+    - Stay within wallet balance
+
+    Output ONLY valid JSON, one command per step, no markdown, no explanation. Examples:
+    {"command": "search_trains", "source_stn": "<SOURCE_FROM_OBSERVATION>", "dest_stn": "<DEST_FROM_OBSERVATION>"}
+    {"command": "check_availability", "train_no": "<TRAIN_NO_FROM_RESULTS>"}
+    {"command": "book_ticket", "train_no": "<TRAIN_NO_FROM_RESULTS>"}
+    {"command": "finish"}
 """).strip()
 
 # ── Formatting Helpers (Strictly matches hackathon spec) ──
@@ -72,9 +82,11 @@ def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> No
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
     print(f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}", flush=True)
 
-def build_user_prompt(step: int, obs_dict: dict, history: List[str]) -> str:
+def build_user_prompt(step: int, obs_dict: dict, history: List[str], goal: Optional[str] = None) -> str:
     """Build context string from observation."""
     parts = [f"Step: {step}"]
+    if goal:
+        parts.append(f"GOAL: {goal}")
     parts.append(obs_dict.get("message", ""))
 
     if obs_dict.get("search_results"):
@@ -87,6 +99,19 @@ def build_user_prompt(step: int, obs_dict: dict, history: List[str]) -> str:
                 f"  Train {t['train_no']}: {t['source']}→{t['dest']}, ₹{t['price']}, "
                 f"Status: {status_info}, Depart: {t.get('depart_time', 'N/A')}, Arrive: {t.get('arrive_time', 'N/A')}"
             )
+        cnf_trains = [t for t in obs_dict["search_results"] if t.get("status") == "CNF"]
+        if cnf_trains:
+            parts.append(f"ACTION REQUIRED: Call check_availability for train_no={cnf_trains[0]['train_no']} (CNF train found)")
+        else:
+            parts.append("WARNING: All trains are WL — search intermediate stations to split the journey")
+
+    if obs_dict.get("availability_status"):
+        avail = obs_dict["availability_status"]
+        parts.append(f"Availability Status: {avail}")
+        if avail == "CNF":
+            parts.append("ACTION REQUIRED: Call book_ticket with the same train_no")
+        else:
+            parts.append("WARNING: Train is WL — try a different train or intermediate route")
 
     if obs_dict.get("booked_itinerary"):
         parts.append("Booked Itinerary:")
@@ -95,9 +120,9 @@ def build_user_prompt(step: int, obs_dict: dict, history: List[str]) -> str:
 
     parts.append(f"Current Location: {obs_dict.get('current_location', 'N/A')}")
     parts.append(f"Wallet Balance: ₹{obs_dict.get('wallet_balance', 0):.0f}")
-    
+
     if history:
-        history_block = "\n".join(history[-4:])
+        history_block = "\n".join(history[-6:])
         parts.append(f"\nPrevious steps:\n{history_block}")
 
     parts.append("\nSend your next action (JSON only).")
@@ -144,14 +169,18 @@ async def main() -> None:
     try:
         await env.connect()
         obs = await env.reset(seed=42, task_id=TASK_ID)
-        
+
+        # Extract goal string from initial observation message
+        init_obs = obs.observation.model_dump() if hasattr(obs, "observation") else obs.model_dump()
+        goal = init_obs.get("message", "")
+
         for step in range(1, MAX_STEPS + 1):
             if obs.done:
                 break
 
             # Handle both StepResult wrappers and direct Observations depending on the OpenEnv version
             obs_data = obs.observation.model_dump() if hasattr(obs, "observation") else obs.model_dump()
-            user_prompt = build_user_prompt(step, obs_data, history)
+            user_prompt = build_user_prompt(step, obs_data, history, goal=goal)
             action_obj = None
             action_str = ""
             error_msg = None
@@ -190,7 +219,22 @@ async def main() -> None:
 
             # 3. Log Step
             log_step(step=step, action=action_str, reward=reward, done=done, error=error_msg)
-            history.append(f"Step {step}: {action_str} -> reward {reward:+.2f}")
+
+            # Build observation summary for history so model knows what results it received
+            obs_summary_parts = []
+            obs_data_next = obs.observation.model_dump() if hasattr(obs, "observation") else obs.model_dump()
+            if obs_data_next.get("search_results"):
+                trains = obs_data_next["search_results"]
+                cnf = [t["train_no"] for t in trains if t.get("status") == "CNF"]
+                wl = [t["train_no"] for t in trains if t.get("status") != "CNF"]
+                if cnf:
+                    obs_summary_parts.append(f"CNF trains: {cnf}")
+                if wl:
+                    obs_summary_parts.append(f"WL trains: {wl}")
+            if obs_data_next.get("availability_status"):
+                obs_summary_parts.append(f"availability={obs_data_next['availability_status']}")
+            obs_summary = f" -> {'; '.join(obs_summary_parts)}" if obs_summary_parts else f" -> reward {reward:+.2f}"
+            history.append(f"Step {step}: {action_str}{obs_summary}")
 
             if done:
                 break
