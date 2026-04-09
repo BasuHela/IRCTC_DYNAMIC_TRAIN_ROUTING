@@ -11,73 +11,41 @@ from openenv.core.env_server.types import (
     State as BaseState,
 )
 
-
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # ACTION SPACE
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 class Action(BaseAction):
-    """Agent's action: search for trains, check availability, book a ticket, or finish."""
     command: Literal["search_trains", "check_availability", "book_ticket", "finish"] = Field(
         ..., description="The command to execute"
     )
-    source_stn: Optional[str] = Field(
-        default=None, description="Source station code (for search_trains)"
-    )
-    dest_stn: Optional[str] = Field(
-        default=None, description="Destination station code (for search_trains)"
-    )
-    train_no: Optional[str] = Field(
-        default=None, description="Train number (for check_availability / book_ticket)"
-    )
-
+    source_stn: Optional[str] = Field(default=None, description="Source station code")
+    dest_stn: Optional[str] = Field(default=None, description="Destination station code")
+    train_no: Optional[str] = Field(default=None, description="Train number")
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # OBSERVATION SPACE
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 class Observation(BaseObservation):
-    """
-    What the agent sees after each step.
-    Inherits `done: bool` and `reward: Optional[float]` from BaseObservation.
-    """
-    message: str = Field(
-        default="", description="Human-readable status message"
-    )
-    search_results: Optional[List[Dict]] = Field(
-        default=None, description="Train search results"
-    )
-    availability_status: Optional[str] = Field(
-        default=None, description="CNF or WL status"
-    )
-    wl_probability: Optional[float] = Field(
-        default=None, description="WL confirmation probability 0.0-1.0"
-    )
-    wallet_balance: float = Field(
-        default=0.0, description="Remaining budget"
-    )
-    booked_itinerary: List[Dict] = Field(
-        default_factory=list, description="All booked legs"
-    )
-    current_location: str = Field(
-        default="", description="Agent's current station"
-    )
-
+    done: bool = Field(default=False, description="Whether the episode has ended")
+    reward: float = Field(default=0.0, description="Reward obtained from the environment")
+    message: str = Field(default="", description="Human-readable status message")
+    search_results: Optional[List[Dict]] = Field(default=None, description="Train search results")
+    availability_status: Optional[str] = Field(default=None, description="CNF or WL status")
+    wl_probability: Optional[float] = Field(default=None, description="WL confirmation probability")
+    wallet_balance: float = Field(default=0.0, description="Remaining budget")
+    booked_itinerary: List[Dict] = Field(default_factory=list, description="All booked legs")
+    current_location: str = Field(default="", description="Agent's current station")
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# INTERNAL STATE (hidden from agent, used by grader)
+# INTERNAL STATE
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 class State(BaseState):
-    """
-    Full internal state — only visible to grading harness via state property.
-    Inherits `episode_id: Optional[str]` and `step_count: int` from BaseState.
-    """
     task_id: int = Field(default=1, description="Task 1, 2, or 3")
     target_source: str = Field(default="", description="Origin station")
     target_dest: str = Field(default="", description="Destination station")
     budget: float = Field(default=0.0, description="Total budget")
     wallet_balance: float = Field(default=0.0, description="Remaining balance")
-    train_database: List[Dict] = Field(
-        default_factory=list, description="Full synthetic timetable"
-    )
+    train_database: List[Dict] = Field(default_factory=list, description="Full synthetic timetable")
     current_location: str = Field(default="", description="Current position")
     searches_made: int = Field(default=0)
     duplicate_searches: int = Field(default=0)
