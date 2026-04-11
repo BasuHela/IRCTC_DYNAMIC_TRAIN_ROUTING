@@ -1,3 +1,11 @@
+---
+title: IRCTC OpenEnv Simulator
+emoji: 🚂
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+pinned: false
+---
 # IRCTC Dynamic Train Routing — OpenEnv Environment
 
 A multi-turn reinforcement learning environment simulating Indian Railways ticket booking. The agent must navigate Waitlisted (WL) constraints, manage a budget, handle timing conflicts, and reason about multi-hop split journeys across 3 difficulty tiers.
@@ -82,21 +90,22 @@ Final reward is clamped to `[0.0, 1.0]`.
 
 ### Prerequisites
 - Python 3.10+
+- [uv](https://docs.astral.sh/uv/) package manager
 - Docker (for containerized deployment)
 
 ### Local Development
 
 ```bash
 # Install dependencies
-pip install -r requirements.txt
+uv sync
 
 # Start the environment server
-python -m server.app
+uv run python -m server.app
 # OR
-uvicorn server.app:app --host 0.0.0.0 --port 7860
+uv run uvicorn server.app:app --host 0.0.0.0 --port 7860
 
 # In another terminal, run the inference agent
-HF_TOKEN=your_token python inference.py
+HF_TOKEN=your_token uv run python inference.py
 ```
 
 ### Using the Client
